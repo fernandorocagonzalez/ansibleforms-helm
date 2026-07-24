@@ -14,6 +14,7 @@
 {{- $cmd := ($server.customCommand | default dict) }}
 {{- $https := eq (atoi (default "0" $appEnv.HTTPS)) 1 }}
 {{- $sensitive := dict "ENCRYPTION_SECRET" true "ADMIN_USERNAME" true "ADMIN_PASSWORD" true }}
+{{- $secretName := ((.Values.secrets | default dict).existingSecret) | default (printf "%s-secrets" .Release.Name) }}
 
 apiVersion: apps/v1
 kind: Deployment
@@ -80,31 +81,31 @@ spec:
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
+                  name: {{ $secretName }}
                   key: DB_USER
 
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
+                  name: {{ $secretName }}
                   key: DB_PASSWORD
 
             - name: ENCRYPTION_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
+                  name: {{ $secretName }}
                   key: ENCRYPTION_SECRET
 
             - name: ADMIN_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
+                  name: {{ $secretName }}
                   key: ADMIN_USERNAME
 
             - name: ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
+                  name: {{ $secretName }}
                   key: ADMIN_PASSWORD
 
           resources:

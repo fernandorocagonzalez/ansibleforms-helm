@@ -184,3 +184,13 @@ storages:
 #   - name: ca-certs-configmap
 #     configMap:
 #       name: ca-certs-configmap
+
+# ------------------------------------------------------------------------------
+# EXISTING SECRET (e.g. managed by External Secrets Operator / Sealed Secrets)
+# When set, the chart does NOT render its own Secret and both deployments read
+# DB_USER, DB_PASSWORD, ENCRYPTION_SECRET, ADMIN_USERNAME and ADMIN_PASSWORD
+# from the referenced Secret. The applications.mysql.password and the
+# sensitive server env values above can then be omitted.
+# ------------------------------------------------------------------------------
+secrets:
+  existingSecret: ''
