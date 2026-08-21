@@ -1,19 +1,38 @@
+{{- /* Normalise values so a missing key does not blow up the render */}}
+{{- $mysql := .Values.storages.mysql | default dict -}}
+{{- $static := $mysql.static | default dict -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   namespace: {{ .Release.Namespace }}
   name: {{ .Release.Name }}-mysql-pvc
   labels:
-   app.kubernetes.io/name: mysql
-   app.kubernetes.io/instance: mysql
-   app.kubernetes.io/component: mysql
-   app.kubernetes.io/part-of: {{ .Release.Name }}
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/instance: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: {{ .Release.Name }}
 spec:
   accessModes:
-    - ReadWriteMany
+    - {{ $mysql.accessMode | default "ReadWriteMany" }}
   resources:
     requests:
-      storage: {{ .Values.storage.mysql.size }}
-  storageClassName: ''
-  volumeName: {{ .Release.Name }}-mysql-pv
+      storage: {{ $mysql.size | default "10Gi" }}
 
+  {{- if $static.enabled }}
+
+  {{- /* Static volume: a PersistentVolume with this name is expected to exist */}}
+  {{- if $static.storageClassName }}
+  storageClassName: {{ $static.storageClassName }}
+  {{- else }}
+  storageClassName: ""
+  {{- end }}
+  volumeName: {{ default (printf "%s-mysql-pv" .Release.Name) $static.volumeName }}
+
+  {{- else }}
+
+  {{- /* Dynamic provisioning through a StorageClass (Longhorn, NFS CSI, ...) */}}
+  {{- if $mysql.className }}
+  storageClassName: {{ $mysql.className }}
+  {{- end }}
+
+  {{- end }}

@@ -1,84 +1,230 @@
-# Secrets // recommended to overwrite in a private secrets file
-application:
+applications:
+
+  # MYSQL CONFIGURATION
+  mysql:
+    password: <ENTER_PASSWORD_HERE>
+    user: root
+    # host: "mysql"
+    # port: "3306"
+
+  # SERVER CONFIGURATION
   server:
     env:
-      ENCRYPTION_SECRET: AnsibleForms!123 # recommended 
-      ADMIN_USERNAME: admin   # default admin
-      ADMIN_PASSWORD: AnsibleForms!123   # default AnsibleForms!123
-  mysql:
-    user: root                 # required
-    password: AnsibleForms!123 # required
+      # -------- BASIC ENV VARIABLES REQUIRED --------
+      HTTPS: 0 # Enables/Disables HTTP/HTTPS Ports 0 [(false) -> port: 80] [1 (true) -> port: 443]
+      ADMIN_PASSWORD: <ENTER_PASSWORD_HERE>
+      ADMIN_USERNAME: admin
+      ENCRYPTION_SECRET: <ENTER_SECRET_HERE>
 
-# Application environment variables
-env:
-  HTTPS: "0" # auto sets port to 80 or 443
-  # See ansibleforms.com for all env vars details
-  
-service:
-  server:
-    type: ClusterIP # check to LoadBalancer or enable ingress
-    # type: LoadBalancer # if you want to expose the service directly, without ingress
-    # loadbalancer:
-      # ip: <static-ip-if-needed>  # to assign a static IP, if your cloud provider supports it   
-  mysql:
-    type: ClusterIP # change to LoadBalancer if you want to expose it
-    # type: LoadBalancer # if you want to expose the mysql service
-    # loadbalancer:
-      # ip:
+      # -------- EXTRA ENV VARIABLES FOR SERVER --------
 
-storage:
-  server:
-    className: # if not set, uses default storage class
-    size: 1Gi
-  mysql:
-    className: # if not set, uses default storage class 
-    size: 1Gi
+      # ******** IGNORE PRIVATE CA CERTS ********
+      # NODE_TLS_REJECT_UNAUTHORIZED: 0
 
-container:
-  server: 
-    image: ansibleguy/ansibleforms:betav6
+      # ******** ENABLE THIS FOR PRIVATE CA CERTS ********
+      # NODE_EXTRA_CA_CERTS: /etc/custom-certs/custom-ca.crt
+
+# ------------------------------------------------------------------------------
+# CONTAINERS CONFIGURATION
+# ------------------------------------------------------------------------------
+containers:
+
+# ~~~~
+
+  mysql:
+    # Pinned on purpose. A floating tag means an unattended major upgrade the
+    # next time the pod is rescheduled, and MySQL does not support downgrades,
+    # so a rollback would leave the data directory unreadable.
+    # Already running a 9.x image? Set this to your current tag before upgrading.
+    image: mysql:8.4
     resources:
       limits:
-        cpu: "0.5"
-        memory: 512Mi
+        cpu: '2'
+        memory: 2048Mi
       requests:
-        cpu: "0.25"
-        memory: 256Mi
-  mysql:
-    image: mysql:latest
+        cpu: '0.5'
+        memory: 512Mi
+
+# ~~~~
+
+  server:
+    image: ansibleguy/ansibleforms:6.2.1
+    replicas: 1
+
+    # Accepts either "Recreate" / "RollingUpdate" or the Kubernetes shape
+    # ({type: Recreate}). Recreate is the safer choice here: the server and the
+    # persistent volume are shared, so two pods alive at once means two
+    # schedulers and two seed runs against the same database.
+    strategy: "RollingUpdate"
+
+    # Written into the pod template, so changing them triggers a rollout. Handy
+    # for a checksum annotation when the forms ConfigMap changes.
+    podAnnotations: {}
+
+    # A terminal on a server process is not useful and keeps stdin open.
+    stdin: false
+    tty: false
+
+    # The app listens on 80 or 443, both privileged, while the container runs
+    # as an unprivileged user. A pod network namespace always starts with
+    # net.ipv4.ip_unprivileged_port_start at 1024, whatever the node says, so
+    # without this the process dies with "listen EACCES: permission denied".
+    # The sysctl is on the kubelet's safe list and allowed under the restricted
+    # pod security standard. Set it to false only if your kubelet refuses the
+    # sysctl, and then serve the app on a port above 1024.
+    bindPrivilegedPorts: true
     resources:
       limits:
-        cpu: "0.5"
-        memory: 512Mi
+        cpu: '4'
+        memory: 4096Mi
       requests:
-        cpu: "0.25"
-        memory: 256Mi
+        cpu: '1'
+        memory: 1024Mi
+    initContainers:
+      - name: prepare-persistent-volume
+        image: ansibleguy/ansibleforms:6.2.1
+        imagePullPolicy: IfNotPresent
+        # This command changes the ownership of the specified directory.
+        command: ["sh", "-c", "chown -R 1000:1000 /app/dist/persistent"]
+        securityContext:
+          # The container must run as the root user to have permission to chown.
+          runAsUser: 0
+        volumeMounts:
+          - name: server-persistent-storage
+            mountPath: /app/dist/persistent
 
-# Ingress configuration
-# Enable ingress and set hostname to use ingress instead of LoadBalancer
-# Make sure to have an ingress controller installed in your cluster
-# If ingress is enabled, you can set application.env.HTTPS to "0".  TLS is handled by the ingress.
-ingress:
-  enabled: false  
-  className: nginx
-  hostname: <your-hostname> 
-  path: /
-  pathType: Prefix
-  tls:
-    enabled: true
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /
-  issuer: letsencrypt-prod
-  extraHosts: [] # ["other.example.com"]
-  extraPaths: [] # [{ path: /api, serviceName: server, servicePort: 80 }]
-  extraAnnotations: {}
-  # Add more as needed
+  # ------------------------------------------------------------------------------
+  # LIVENESS / READINESS CONFIGURATION
+  # ------------------------------------------------------------------------------
+
+    # The startup probe covers the first boot, when the database migrations run
+    # and the app can take minutes to answer. Until it succeeds the liveness
+    # probe is not evaluated, which is what stops the restart loop people hit on
+    # a fresh install. failureThreshold x periodSeconds is the budget, 300s here.
+    startup:
+      enabled: true
+      path: /
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 30
+
+    liveness:
+      path: /
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      timeoutSeconds: 15
+      failureThreshold: 3
+    readiness:
+      path: /
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      timeoutSeconds: 15
+      failureThreshold: 3
+
+  # ---------------------------------------------------
+  # ENABLE THIS FOR CUSTOM COMMANDS
+  # ---------------------------------------------------
+    # customCommand:
+    #   command: ["/bin/sh", "-c"]
+    #   args:
+    #   - "node ./index.js"
+
+  # ---------------------------------------------------
+  # ENABLE THIS FOR CUSTOM CA CERTS
+  # ---------------------------------------------------
+    # extraVolumeMounts:
+    #   - name: ca-certs-configmap
+    #     mountPath: /etc/custom-certs/custom-ca.crt
+    #     subPath: custom-ca.crt
+    #     readOnly: true
+
+# ~~~~
+
+
+# ------------------------------------------------------------------------------
+# FORMS CONFIGURATION
+# ------------------------------------------------------------------------------
 
 forms:
   configMap:
     enabled: false
-    name: ""                          # existing ConfigMap name
-    key: forms.yaml                   # clave dentro del ConfigMap
+    key: forms.yaml
     mountPath: /app/dist/persistent/forms.yaml
+    name: ''
+  customJs:
+    enabled: false
+    key: custom.js
+    mountPath: /app/dist/src/functions/custom.js
+    name: ''
+  extraFormsConfigMap:
+    enabled: false
+    mountPath: /app/dist/persistent/forms
+    name: ''
+
+# ------------------------------------------------------------------------------
+# INGRESS CONFIGURATION
+# ------------------------------------------------------------------------------
+
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+  className: nginx
+  enabled: true
+  extraAnnotations: {}
+  extraHosts: []
+  extraPaths: []
+  hostname: <YOUR INGRESS URL>
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: true
+
+# ------------------------------------------------------------------------------
+# SERVICES CONFIGURATION
+# ------------------------------------------------------------------------------
+
+services:
+# ~~~~
+  mysql:
+    type: ClusterIP
+# ~~~~
+  server:
+    type: ClusterIP
+# ~~~~
+
+# ------------------------------------------------------------------------------
+# STORAGE CONFIGURATION
+# ------------------------------------------------------------------------------
+
+storages:
+# ~~~~
+  mysql:
+    className: ''
+    size: 10Gi
+    # ReadWriteMany is the default the chart has always used. Plenty of storage
+    # classes only offer ReadWriteOnce, and with a single replica that is fine.
+    accessMode: ReadWriteMany
+    static:
+      enabled: false
+      storageClassName: ''
+      volumeName: ''
+# ~~~~
+  server:
+    className: ''
+    size: 10Gi
+    accessMode: ReadWriteMany
+    static:
+      enabled: false
+      storageClassName: ''
+      volumeName: ''
+# ~~~~
+
+# ------------------------------------------------------------------------------
+# ADD HERE EXTRA VOLUME MOUNTS (if needed) (e.g CUSTOM CA CONFIGMAP or SECRET)
+# ------------------------------------------------------------------------------
+# extraVolumes:
+#   - name: ca-certs-configmap
+#     configMap:
+#       name: ca-certs-configmap

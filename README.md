@@ -3,49 +3,85 @@
 This Helm chart deploys the AnsibleForms application and its MySQL database on Kubernetes. It is designed for flexibility, security, and ease of use in both development and production environments.
 
 ## Features
+
 - Deploys AnsibleForms and MySQL with configurable images and resources
 - Handles all sensitive data (DB credentials, admin credentials, encryption secret) via Kubernetes Secrets
 - All application environment variables are configurable via `values.yaml`
 - Storage class and size for both server and MySQL are configurable
+- Supports both **dynamic provisioning** (StorageClass-based) and **pre-created static PVs**
 - Ingress is optional and highly customizable (hostname, TLS, annotations, etc.)
 - Service type (ClusterIP, LoadBalancer, NodePort) is configurable, with support for static LoadBalancer IPs
-- (Optional) Support for managing `forms.yaml` and forms/*.yaml definitions via ConfigMaps
+- (Optional) Support for managing `forms.yaml`, `forms/*.yaml` definitions, and `custom.js` via ConfigMaps
+
+## Installing
+
+From the chart repository:
+
+```bash
+helm repo add ansibleforms https://ansibleguy76.github.io/ansibleforms-helm/
+helm repo update
+helm show values ansibleforms/ansibleforms > my_values.yaml
+# edit my_values.yaml, then
+helm upgrade --install ansibleforms ansibleforms/ansibleforms \
+  --namespace ansibleforms --create-namespace \
+  --values my_values.yaml
+```
+
+Or straight from the OCI registry, no repository to add:
+
+```bash
+helm show values oci://ghcr.io/ansibleguy76/charts/ansibleforms > my_values.yaml
+helm upgrade --install ansibleforms oci://ghcr.io/ansibleguy76/charts/ansibleforms \
+  --namespace ansibleforms --create-namespace \
+  --values my_values.yaml
+```
+
+Pin the chart version in anything that runs unattended, for example
+`--version 6.2.0`, so a new release never lands on its own.
 
 ## Usage
 
-### 1. Clone the helm chart and values.yaml
+### 1. Clone the Helm chart and values.yaml
 
-```
+Only needed if you want to work on the chart itself rather than install it.
+
+```bash
 git clone https://github.com/ansibleguy76/ansibleforms-helm
 cp ./ansibleforms-helm/values.yaml my_values.yaml
 ```
 
-### 2. Configure personal values
+### 2. Configure your values
 
-Update the my_values.yaml to your taste
+Update the `my_values.yaml` to your taste.
 
-#### minimalistic example without ingress:
+#### Minimalistic example without ingress (dynamic storage with a StorageClass)
+
 ```yaml
-application:
+applications:
   server:
     env:
       HTTPS: 1 # auto sets port to 443
-      ENCRYPTION_SECRET: "Abc123Abc123Abc123Abc123Abc123Abc1" # optional but recommended, just a 32 char ramdom string
+      ENCRYPTION_SECRET: "Abc123Abc123Abc123Abc123Abc123Abc1" # optional but recommended, 32 chars random string
 
-# storage: # not provided -> default storageclass
+storages:
+  server:
+    className: longhorn   # example dynamic StorageClass
+    size: 5Gi
+  mysql:
+    className: longhorn
+    size: 5Gi
 
-# container: # not provided -> latest v6 beta
-
-service:
+services:
   server:
     type: LoadBalancer
     loadbalancer:
-      ip: 10.0.0.1      # the ip to serve ansibleforms https://10.0.0.1
+      ip: 10.0.0.1        # AnsibleForms will be available at https://10.0.0.1
 ```
 
-#### Extended Example with ingress:
+#### Extended example with ingress
+
 ```yaml
-application:
+applications:
   server:
     env:
       HTTPS: 0 # auto sets ports on 80 or 443
@@ -57,7 +93,7 @@ application:
     user: root
     password: MyDbPassword1!!
 
-storage:
+storages:
   server:
     className: nfs-csi       # just an example storage provider
     size: 1Gi
@@ -65,9 +101,9 @@ storage:
     className: nfs-csi-nomap # just an example storage provider
     size: 1Gi
 
-container:
+containers:
   server:
-    image: ansibleguy/ansibleforms:betav6
+    image: ansibleguy/ansibleforms:6.2.1
     resources:
       limits:
         cpu: "0.5"
@@ -76,7 +112,7 @@ container:
         cpu: "0.25"
         memory: 256Mi
   mysql:
-    image: mysql:latest
+    image: mysql:8.4
     resources:
       limits:
         cpu: "0.5"
@@ -85,7 +121,7 @@ container:
         cpu: "0.25"
         memory: 256Mi
 
-service:
+services:
   server:
     type: ClusterIP # service is exposed with ingress
   mysql:
@@ -106,14 +142,98 @@ ingress:
   issuer: letsencrypt-prod
   extraHosts: [] # ["other.example.com"]
   extraPaths: [] # [{ path: /api, serviceName: server, servicePort: 80 }]
-  extraAnnotations: {}  
+  extraAnnotations: {}
 ```
 
+### 3. Storage configuration: dynamic provisioning vs static PVs
 
+The chart supports two storage modes for both `server` and `mysql`:
 
-### 3. Using ConfigMaps for `forms.yaml` and form definitions (optional)
+1. **Dynamic provisioning (default)** – uses a Kubernetes StorageClass to dynamically provision PVs.
+2. **Static PVs** – binds to pre-created PersistentVolumes by name.
 
-AnsibleForms uses a main configuration file (`forms.yaml`) and can also load additional form definitions from a `forms/` directory inside the persistent folder.
+#### 3.1 Dynamic provisioning (recommended for Longhorn / NFS-CSI, etc.)
+
+Dynamic provisioning is the default mode. You typically configure:
+
+```yaml
+storages:
+  server:
+    className: longhorn   # or any other existing StorageClass
+    size: 5Gi
+    static:
+      enabled: false
+  mysql:
+    className: longhorn
+    size: 5Gi
+    static:
+      enabled: false
+```
+
+- If `storages.<component>.className` is set, the PVC will use that StorageClass.
+- If `className` is omitted, the cluster's **default StorageClass** (if any) will be used.
+- `static.enabled: false` (default) means **no `volumeName` is set**, so the cluster can bind the PVC to dynamically provisioned PVs.
+
+#### 3.2 Static PVs (pre-created PersistentVolumes)
+
+If you prefer to manage your own PersistentVolumes (for example, an NFS export or a hostPath PV), you can pre-create a PV and then tell the chart to bind to it.
+
+Example: pre-create a static PV for MySQL:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ansibleforms-mysql-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""                     # empty for static binding
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.0.0.10
+    path: /exports/ansibleforms-mysql
+```
+
+Then configure the chart to use it:
+
+```yaml
+storages:
+  mysql:
+    size: 5Gi
+    static:
+      enabled: true
+      volumeName: ansibleforms-mysql-pv    # must match the PV metadata.name
+      storageClassName: ""                 # must match the PV storageClassName
+```
+
+When `static.enabled: true`:
+
+- The PVC will include a `volumeName` (defaulting to `<release>-mysql-pv` / `<release>-server-pv` if `volumeName` is empty).
+- The PVC will use `static.storageClassName` (or `""` if not provided).
+- This binds the PVC directly to the specified pre-created PV.
+
+You can configure the same pattern for the `server` volume:
+
+```yaml
+storages:
+  server:
+    size: 5Gi
+    static:
+      enabled: true
+      volumeName: ansibleforms-server-pv
+      storageClassName: ""
+```
+
+If you do **not** need static PVs, simply leave `static.enabled: false` and use the dynamic provisioning mode.
+
+---
+
+### 4. Using ConfigMaps for `forms.yaml`, form definitions, and `custom.js` (optional)
+
+AnsibleForms uses a main configuration file (`forms.yaml`) and can also load additional form definitions from a `forms/` directory inside the persistent folder. It also supports a `custom.js` file for client-side customization, typically mounted at `/app/dist/src/functions/custom.js` as described in the AnsibleForms FAQ.
 
 This chart provides optional values to mount those files from ConfigMaps:
 
@@ -127,13 +247,19 @@ forms:
 
   extraFormsConfigMap:
     enabled: true
-    name: ansibleforms-forms-defs          # ConfigMap containing multiple form YAMLs
-    mountPath: /app/dist/persistent/forms  # mounted as a directory
+    name: ansibleforms-forms-defs           # ConfigMap containing multiple form YAMLs
+    mountPath: /app/dist/persistent/forms   # mounted as a directory
+
+  customJs:
+    enabled: true
+    name: ansibleforms-custom-js            # ConfigMap containing custom.js
+    key: custom.js                          # key in the ConfigMap
+    mountPath: /app/dist/src/functions/custom.js
 ```
 
-When `forms.configMap.enabled` is `false` (the default), the chart behaves as before and does not mount any extra ConfigMap. The same applies to `extraFormsConfigMap.enabled`.
+When any of the `enabled` flags are `false` (the default), the chart behaves as before and does not mount the corresponding ConfigMap.
 
-#### Example: main forms configuration (`forms.yaml`)
+#### 4.1 Example: main forms configuration (`forms.yaml`)
 
 The following ConfigMap provides the main `forms.yaml` file, which defines categories, roles, and constants:
 
@@ -178,7 +304,7 @@ data:
 
 With the `forms.configMap` values set as shown earlier, this `forms.yaml` will be mounted at `/app/dist/persistent/forms.yaml`, which is the default location used by AnsibleForms.
 
-#### Example: additional form definitions (`forms/*.yaml`)
+#### 4.2 Example: additional form definitions (`forms/*.yaml`)
 
 You can keep each form definition in a separate YAML file within a second ConfigMap. Each key under `data:` becomes a file inside `/app/dist/persistent/forms/`:
 
@@ -225,25 +351,139 @@ data:
   #   ...
 ```
 
+#### 4.3 Example: `custom.js` for client-side customization
 
-### 3. Install the Chart
+To inject a `custom.js` file into AnsibleForms, create a ConfigMap like:
+
+```yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ansibleforms-custom-js
+  namespace: ansibleforms
+data:
+  custom.js: |
+    // Example custom JavaScript for AnsibleForms
+    window.afCustom = window.afCustom || {};
+    window.afCustom.onFormLoad = function (form) {
+      console.log("Form loaded:", form.name);
+    };
+```
+
+With `forms.customJs.enabled: true` and the values shown above, this file will be mounted at `/app/dist/src/functions/custom.js`, matching the location described in the AnsibleForms documentation.
+
+### 5. Install the Chart
 
 Depending on your environment, choose an existing namespace or choose to create a new one.
 
-```sh
+```bash
 helm install ansibleforms ./ansibleforms-helm -f ./my_values.yaml -n ansibleforms --create-namespace
 ```
 
 ## Security Best Practices
+
 - Use `--set` or `--set-file` to hide secrets
+- Consider using external secret management solutions (Vault, SOPS, etc.) for highly sensitive data
 
 ## Customization
+
+### Basic 
+
 - All environment variables can be set in `env:`.
 - All resource limits, storage, and service types are configurable.
 - Ingress can be enabled/disabled and fully customized.
+- Storage can be backed by dynamic StorageClasses or static PVs as needed.
+- Forms configuration (`forms.yaml` and additional `forms/*.yaml`) and `custom.js` can be managed via ConfigMaps as shown above.
+
+### Extras 1. Define extra volumes (root level) that you want to mount to containers.
+```
+extraVolumes:
+  # ------------------------------------------------------------------------------
+  # ADD HERE EXTRA VOLUME MOUNTS (if needed) (e.g CUSTOM CA CONFIGMAP or SECRET)
+  # ------------------------------------------------------------------------------
+  - name: ca-certs-configmap
+    configMap:
+      name: ca-certs-configmap
+            
+```
+
+### Extras 2. Define extra volumes mounts that will be available to the server pod
+```
+containers:
+  server:
+    extraVolumeMounts:
+      # ------------------------------------------------------------------
+      # ENABLE THIS FOR CUSTOM CA CERTS (Must create configmap manually!)
+      # ------------------------------------------------------------------
+      - name: ca-certs-configmap
+        mountPath: /etc/custom-certs/custom-ca.crt
+        subPath: custom-ca.crt
+        readOnly: true
+            
+```
+### Extras 3. Define one or more init containers (e.g for changing the ownership of the specified directory)
+```
+containers:
+  server:
+    initContainers:
+      - name: prepare-persistent-volume
+        image: ansibleguy/ansibleforms:6.1.3-rc
+        imagePullPolicy: IfNotPresent
+        # This command changes the ownership of the specified directory.
+        command: ["sh", "-c", "chown -R 1000:1000 /app/dist/persistent"]
+        securityContext:
+          # The container must run as the root user to have permission to chown.
+          runAsUser: 0
+        volumeMounts:
+          - name: server-persistent-storage
+            mountPath: /app/dist/persistent
+```
+### Extras 4. Configure extra environment variables
+```
+applications:
+  server:
+    env:
+    # ******** UNCOMMENT TO IGNORE PRIVATE CA CERTS ********
+    # NODE_TLS_REJECT_UNAUTHORIZED: 0
+
+    # ******** UNCOMMENT THIS FOR PRIVATE CA CERTS ********
+    # NODE_EXTRA_CA_CERTS: /etc/custom-certs/custom-ca.crt
+```
+
+
+### Extras 5. Other possible settings (other applications)
+```
+applications:
+  mysql:
+    password: <ENTER_PASSWORD_HERE>
+    user: root
+    # host: "mysql"   -> Setup custom mysql
+    # port: "3306"    -> Setup custom mysql port
+```
+
+
+### Extras 5. Server Liveness and Readiness
+#### Note: In case you face readiness issues or 503 Server errors after long api requests + big latency queries then increase the timeout value below.
+```
+
+containers:
+  server:
+    liveness:
+      path: /
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      timeoutSeconds: 15
+    readiness:
+      path: /
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      timeoutSeconds: 15
+
+```
+
 
 ## Notes
-- Pods/services are named and discoverable by their service name within the namespace.
 
----
-For a full list of environment variables and their meanings, see the comments in `values.yaml` or visit [ansibleforms.com](https://ansibleforms.com).
+- Pods/services are named and discoverable by their service name within the namespace.
+- For a full list of environment variables and their meanings, see the comments in `values.yaml` or visit the AnsibleForms documentation.
